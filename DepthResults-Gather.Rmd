@@ -1,0 +1,190 @@
+---
+title: 'Narwhals'
+author: 'Lars Reiter Nielsen'
+output:
+    html_document:
+      css: styles.css
+      highlight: pygments
+      code_folding: show
+      fig_height: 5
+      fig_width: 10
+      theme: readable
+#    toc: yes
+#  pdf_document:
+#    toc: yes
+
+---
+
+```{r init,echo=F,warning=F,include=F}
+library(ggplot2)   ## Grammar of graphics
+library(reshape2)  ## Reshaping data frames
+library(dplyr)     ## 
+library(data.table) ##
+library(readr)
+library(lattice)   ## More graphics
+library(hexbin)    ## and more graphics
+library(gridExtra) ## ... and more graphics
+library(xtable)    ## LaTeX formatting of tables
+library(splines)   ## Splines -- surprise :-)
+library(grid)      ## For 'unit'
+library(latex2exp)
+library(tinytex)
+library(readxl)
+library(stringr)
+library(segmented) # segmented regression
+library(tseriesEntropy)
+theme_set(theme_bw())
+
+```
+
+```{r}
+# DepthGrid data
+load("NWDG.RData")
+DT.NW <- DT.all
+load("BWDG.RData")
+DT.BW <- DT.all
+
+DT.BW$HT <- "All (3)"
+
+DT.NW$type <- "Narwhal"
+DT.BW$type <- "Bowhead Whale"
+
+#DT.NW$TD.Interval <- rep(rep(c("Deep","Medium","Shallow"),each=40),2)
+#DT.BW$TD.Interval <- rep(c("Deep","Medium","Shallow"),each=10)
+DT.all <- rbind(DT.NW,DT.BW)
+
+# JS data
+load("NW.JS.RData")
+NW.JS <- df.JS
+load("BW.JS.RData")
+NW.JS$type <- "Narwhal"
+df.JS$type <- "Bowhead Whale"
+df.JS$Handlingtime <- "All (3)"
+df.JS <- rbind(df.JS,NW.JS)
+load("NW.JSN.RData")
+NW.JSN <- JS.N
+load("BW.JSN.RData")
+BW.JSN <- JS.N
+load("NW.means.RData")
+NW.means <- meansdf
+load("BW.votes.RData")
+BW.means <- avec
+```
+
+
+```{r}
+# correct number of whales
+DT.NW[DT.NW$HT=="Short (N=5)",]$HT <- "Short (N=7)"
+DT.NW[DT.NW$HT=="Long (N=10)",]$HT <- "Long (N=13)"
+
+# Narwhals
+qts <- c(1,8,18,52)
+nInts <- 40
+intLabsx <- c(1:(nInts-1),"Normal")
+intLabsy <- mapply(function(X,Y)paste0("[",X,",",Y,"[") ,qts[-4]*20,shift(qts,-1)[-4]*20)
+names(intLabsy)<-NULL
+names(qts)<- NULL
+
+# inverse target depth ranges
+intLabsy <- c(">360","[160,360]","[20,160[")
+DT.NW$TD <- rep(3:1,length.out=nrow(DT.NW))
+
+(p.NW<-ggplot(DT.NW,aes(x=as.factor(Interval),y=as.factor(TD),fill=TDD)) +
+  geom_tile(aes(fill=TDD),color="black") +
+#  geom_text(aes(label = round(TDD,2)), color = "black", size = 4)+
+  coord_fixed()+
+  xlab("hours")+
+  ylab("Target depth (meters)")+
+  scale_fill_gradient(low = "white", high = "purple3",name="Time spend (%)")+
+  scale_x_discrete(breaks = 1:(nInts),labels=intLabsx,expand=c(0,0))+
+  scale_y_discrete(breaks=as.factor(1:3),labels=intLabsy,expand=c(0,0))+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1.2, hjust=1),
+        plot.title =element_text(hjust = 0.5,vjust=5,size=12),plot.margin=unit(c(1,1,-0.5,1), "cm"))+
+  ggtitle("Hourly empirical distribution(s) of Dive Duration for N=20 Narwhals")+
+  facet_wrap(.~HT,ncol=1))
+
+# Bowhead whales
+qts <- c(2,5,9)
+depthInt <- 20
+nInts <- 10
+intLabsx <- c(1:(nInts-1),"Normal")
+intLabsy <- mapply(function(X,Y)paste0("[",X,",",Y,"[") ,qts[-3]*depthInt,shift(qts,-1)[-3]*depthInt)
+intLabsy <- c("[20,80[",intLabsy)
+intLabsy <- c(">120","[60,120]","[20,60[")
+names(intLabsy)<-NULL
+names(qts)<- NULL
+
+# Inverse Target depth ranges
+DT.BW$TD <- rep(3:1,length.out=nrow(DT.BW))
+
+(p.BW <- ggplot(DT.BW,aes(x=as.factor(Interval),y=as.factor(TD),fill=TDD)) +
+  geom_tile(aes(fill=TDD),color="black") +
+#  geom_text(aes(label = round(TDD,2)), color = "black", size = 4)+
+  coord_fixed()+
+  xlab("hours")+
+  ylab("Target depth (meters)")+
+  scale_fill_gradient(low = "white", high = "goldenrod",name="Time spend (%)")+
+  scale_x_discrete(breaks = 1:(nInts),labels=intLabsx,expand=c(0,0))+
+  scale_y_discrete(breaks=as.factor(1:3),labels=intLabsy,expand=c(0,0))+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1.2, hjust=1),
+        plot.title =element_text(hjust = 0.5,vjust=5,size=12))+ggtitle("Hourly empirical distribution(s) of Dive Duration for N=3 Bowhead Whales"))
+
+g<-grid.arrange(p.NW,p.BW, ncol=1)
+ggsave("DG-NWBW.pdf",plot=g,width=8,height=5,dpi=600)
+```
+
+```{r}
+plot.max <- 80 # plotting range
+
+# correct number of whales
+df.JS[df.JS$Handlingtime=="Short (5)",]$Handlingtime <- "Short (N=7)"
+df.JS[df.JS$Handlingtime=="Long (10)",]$Handlingtime <- "Long (N=13)"
+
+(p2.NW <- ggplot(df.JS[df.JS$type=="Narwhal",],aes(x=Interval,y=JS,fill=Handlingtime))+
+geom_ribbon(aes(ymin=quantile(NW.JSN,0.025) ,alpha=I(0.2),ymax =quantile(NW.JSN,0.975)),color="black",fill="thistle")+
+#  geom_smooth(aes(color=Handlingtime))+
+  geom_point(size=2,shape=24)+
+  geom_vline(aes(xintercept=NW.means$rec[1]),linetype="longdash",color="red")+
+  geom_vline(aes(xintercept=NW.means$rec[2]),linetype="solid",color="red")+
+  geom_vline(aes(xintercept=NW.means$rec[3]),linetype="solid",color="red")+
+  geom_vline(aes(xintercept=NW.means$rec[4]),linetype="longdash",color="blue")+
+  geom_vline(aes(xintercept=NW.means$rec[5]),linetype="solid",color="blue")+
+  geom_vline(aes(xintercept=NW.means$rec[6]),linetype="solid",color="blue")+
+  geom_hline(aes(yintercept=mean(NW.JSN)),linetype="longdash")+
+  ylab("Jensen-Shannon divergence")+
+  xlab("hours")+
+  annotate("text", x=60, y=0.35, label= "N=20 Narwhals",size=3,color="darkorchid4")+
+  scale_x_continuous(breaks=seq(0,plot.max,max(1,5)),
+                     labels=seq(0,plot.max,max(1,5)),
+                     limits=c(1,plot.max))+
+ scale_color_manual(values=c("blue", "red"))+
+  scale_fill_manual(values=c("royalblue", "brown1"))+
+  labs(title = str_wrap("", 60))+
+  theme(legend.position="right",plot.title=element_text(hjust=0.5)))
+
+trim.max <- 16
+
+(p2.BW <- ggplot(df.JS[df.JS$type=="Bowhead Whale",],aes(x=Interval,y=JS))+
+geom_ribbon(aes(ymin=quantile(BW.JSN,0.025) ,alpha=I(0.1),ymax =quantile(BW.JSN,0.975)),color="black",fill="gold")+
+#  geom_smooth(fill="goldenrod",color="black")+
+  geom_point(size=2,shape=24,fill="khaki3")+
+  geom_vline(aes(xintercept=BW.means[2]),linetype="solid",color="gray12")+
+  geom_vline(aes(xintercept=BW.means[1]),linetype="longdash",color="gray12")+
+  geom_vline(aes(xintercept=BW.means[3]),linetype="solid",color="gray12")+
+  geom_hline(aes(yintercept=mean(BW.JSN)),linetype="longdash")+
+  ylab("Jensen-Shannon divergence")+
+  xlab("hours")+
+  annotate("text", x=13, y=0.27, label= "N=3 Bowhead Whales",size=3,color="goldenrod4")+
+  scale_x_continuous(breaks=seq(0,trim.max,max(1,5)),
+                     labels=seq(0,trim.max,max(1,5)),
+                     limits=c(1,trim.max))+
+ scale_color_manual(values=c("blue", "red"))+
+  scale_fill_manual(values=c("royalblue", "brown1"))+
+  labs(title = str_wrap("", 60))+
+  theme(legend.position="bottom",plot.title=element_text(hjust=0.5)))
+
+g<-grid.arrange(p2.NW,p2.BW,top="Cross entropy of hourly Dive duration post-tagging relative to normal Dive duration", ncol=1)
+ggsave("JS-NWBW.pdf",plot=g,width=8,height=8,dpi=600)
+
+```
+

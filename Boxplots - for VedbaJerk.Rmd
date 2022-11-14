@@ -1,0 +1,244 @@
+---
+title: 'Narwhales'
+author: 'Lars Reiter Nielsen'
+output:
+    html_document:
+      css: styles.css
+      highlight: pygments
+      code_folding: show
+      fig_height: 6
+      fig_width: 7
+      theme: readable
+#    toc: yes
+#  pdf_document:
+#    toc: yes
+
+---
+
+```{r set-options, echo=FALSE, cache=FALSE}
+options(width = 1000)
+```
+
+```{r init,echo=F,warning=F,include=F}
+library(ggplot2)   ## Grammar of graphics
+library(reshape2)  ## Reshaping data frames
+library(dplyr)     ## 
+library(data.table) ##
+library(readr)
+library(tidyverse)
+library(lattice)   ## More graphics
+library(hexbin)    ## and more graphics
+library(gridExtra) ## ... and more graphics
+library(xtable)    ## LaTeX formatting of tables
+library(splines)   ## Splines -- surprise :-)
+library(grid)      ## For 'unit'
+library(RColorBrewer)
+library(readxl)
+theme_set(theme_bw())
+
+```
+
+
+# Metode: Fordelings plots
+
+```{r data klargøring, include=FALSE}
+# load data
+df0 <- read.table('Finalmin-New.txt', sep="\t",header=TRUE)
+df0.BW <- read.table('Finalmin_GW.txt', sep="\t",header=TRUE)
+df <- df0 %>% dplyr::select(min,VeDBA=vedba,ODBA=odba,Jerk=jerk,Ind) # ignore depth column
+df.BW <- df0.BW %>% dplyr::select(min,VeDBA=vedba,Jerk=jerk,Ind)
+
+df <- df[!(df$Ind %in% c("Frida","Freya")),]
+
+# Threshold for normal behaviour (TODO: Fit to scale)
+th <- 40 #  36 hours threshold normal behaviour
+deltaT <- 1 # hourly sample duration
+
+# Vedba/jerk: remove NA values
+dt <- as.data.table(df) # data table format
+dt <- na.omit(dt) # remove NA rows
+dt.bw <- as.data.table(df.BW)
+dt.bw <- na.omit(dt.bw) #
+
+# handling times
+HTdf <- read_excel("HT.xlsx")
+whales <- unique(dt$Ind)
+maleNames <- c('Asgeir','Balder','Helge','Thor','Kyrri','Siggi','Nemo','Frederik','Eske','Bjarne')
+HTdf <- HTdf[HTdf$Ind %in% whales,]
+colnames(HTdf)<-c("Ind","handlingtime","size")
+HTdf <- mutate(HTdf,HT=ifelse(HTdf$handlingtime < 60, "Short handlingtime","Long handlingtime"),
+               sizeId = ifelse(HTdf$size < quantile(HTdf$size,0.25),1,ifelse(HTdf$size<quantile(HTdf$size,0.75),2,3)),
+               Sex = ifelse(HTdf$Ind %in% maleNames,"Male","Female"))
+
+# add handling time
+dt<-merge(dt,HTdf,by="Ind")
+
+# Add sex column
+males <- c('Asgeir','Balder','Jonas','Helge','Thor','Kyrri','Siggi','Nemo','Frederik')
+
+# remove columns (optional)
+HTdf$handlingtime <- NULL
+HTdf$size <- NULL
+HTdf$sizeId <-NULL
+HTdf$Sex <- NULL
+
+dt$ODBA <- NULL
+dt$handlingtime<-NULL
+dt$size<-NULL
+dt$sizeId<-NULL
+dt$Sex <-NULL
+```
+
+Vi sammenholder den emperiske fordeling for tidsintervaller [t,t+1] fra t gående fra 0 til 35 timer, med den emperiske fordeling fra 40 timer og fremefter (normal adfærd). 
+
+Dette gøres med (1) boxplots og (2) ved at se på hvordan fraktilerne ændrer sig med intervallerne.
+
+```{r}
+# trim data at
+t.trim <- 20
+dt.bw<-dt.bw[dt.bw$min<t.trim*60,] # early trim
+
+# normal threshold values
+thnw <- 40
+thbw <- 10
+### Get mean and standard deviation within each group in normal area
+# VeDBA
+meanShortV <- mean(dt[dt$HT=="Short handlingtime" & dt$min > thnw*60,]$VeDBA)
+sdShortV <- sd(dt[dt$HT=="Short handlingtime" & dt$min > thnw*60,]$VeDBA)
+meanLongV <- mean(dt[dt$HT=="Long handlingtime" & dt$min > thnw*60,]$VeDBA)
+sdLongV <- sd(dt[dt$HT=="Long handlingtime" & dt$min > thnw*60,]$VeDBA)
+meanAllV <- mean(dt.bw[dt.bw$min > thbw*60,]$VeDBA)
+sdAllV <- sd(dt.bw[dt.bw$min > thbw*60,]$VeDBA)
+# Jerk
+meanShortJ <- mean(dt[dt$HT=="Short handlingtime" & dt$min > thnw*60,]$Jerk)
+sdShortJ <- sd(dt[dt$HT=="Short handlingtime" & dt$min > thnw*60,]$Jerk)
+meanLongJ <- mean(dt[dt$HT=="Long handlingtime" & dt$min > thnw*60,]$Jerk)
+sdLongJ <- sd(dt[dt$HT=="Long handlingtime" & dt$min > thnw*60,]$Jerk)
+meanAllJ <- mean(dt.bw[dt.bw$min > thbw*60,]$Jerk)
+sdAllJ <- sd(dt.bw[dt.bw$min > thbw*60,]$Jerk)
+
+# gather
+nwdf <- data.frame(HT = rep(c("Long handlingtime","Short handlingtime"),each=2), metricId = rep(c("VeDBA","Jerk"),2), sdvals = c(sdLongV,sdLongJ,sdShortV,sdShortJ),meanvals=c(meanLongV,meanLongJ,meanShortV,meanShortJ))
+bwdf <- data.frame(metricId=c("VeDBA","Jerk"),meansvals=c(meanAllV,meanAllJ),sdvals=c(sdAllV,sdAllJ))
+```
+
+```{r}
+#### NORMALIZE METRICS ####
+# narwhals
+for(h in c("Short handlingtime","Long handlingtime")){
+  # vedba
+       dt[dt$HT==h,]$VeDBA <- (dt[dt$HT==h,]$VeDBA-nwdf[nwdf$HT==h & nwdf$metricId=="VeDBA",]$meanvals)/nwdf[nwdf$HT==h & nwdf$metricId=="VeDBA",]$sdvals
+  # jerk
+      dt[dt$HT==h,]$Jerk <- (dt[dt$HT==h,]$Jerk-nwdf[nwdf$HT==h & nwdf$metricId=="Jerk",]$meanvals)/nwdf[nwdf$HT==h & nwdf$metricId=="Jerk",]$sdvals
+     }
+
+# bowhead whales
+# vedba
+dt.bw$VeDBA <- (dt.bw$VeDBA-bwdf[bwdf$metricId=="VeDBA",]$meansvals)/bwdf[bwdf$metricId=="VeDBA",]$sdvals
+# jerk
+dt.bw$Jerk <- (dt.bw$Jerk-bwdf[bwdf$metricId=="Jerk",]$meansvals)/bwdf[bwdf$metricId=="Jerk",]$sdvals
+
+```
+
+```{r ny2,echo=F}
+
+## Define interval variable for NARWHALS
+dt<-dt[dt$min < 60*t.trim,]
+dt[,Interval:=character()]
+dt$Interval <- as.character(ceiling(dt$min/60))
+#dt[dt$min>(th-1)*60,]$Interval <- "N"
+#dt$Interval <- factor(dt$Interval,levels=c(as.character(1:(th-1)),"N"))
+dt$Interval <- factor(dt$Interval,levels=as.character(1:(t.trim)))
+
+## Define interval variable for BOWHEAD WHALES
+dt.bw <- dt.bw[dt.bw$min<60*t.trim,]
+dt.bw[,Interval:=character()]
+dt.bw$Interval <- as.character(ceiling(dt.bw$min/60))
+#dt.bw[dt.bw$min>(15-1)*60,]$Interval <- "N"
+#dt.bw$Interval <- factor(dt.bw$Interval,levels=c(as.character(1:(15-1)),"N"))
+dt.bw$Interval <- factor(dt.bw$Interval,levels=as.character(1:(t.trim)))
+```
+
+
+
+```{r}
+## merge dataframes from narwhals and bowhead whales
+n <- nrow(dt)
+curnames <- colnames(dt)
+curnames[3] <- "metric"
+colnames(dt) <- curnames
+dt.aux <- dt[,c(1,2,4,5,6)]
+colnames(dt.aux)<-c("Ind","min","metric","HT","Interval")
+dt<-rbind(dt[,c(1,2,3,5,6)],dt.aux)
+dt$metricId <- rep(c("VeDBA","Jerk"),each=n)
+dt$type <- "Narwhal"
+
+n.bw <- nrow(dt.bw)
+dt.bw$HT <- "All"
+dt.bw$type <- "Bowhead whales"
+dt.aux <- dt.bw[,c(1,2,4,5,6,7)]
+colnames(dt.aux) <- c("min","metric","Ind","Interval","HT","type")
+colnames(dt.bw) <- c("min","VeDBA","metric","Ind","Interval","HT","type")
+dt.bw <- rbind(dt.bw[,c(1,3,4,5,6,7)],dt.aux)
+dt.bw$metricId <- rep(c("VeDBA","Jerk"),each=n.bw)
+
+colnames(dt.bw)
+colnames(dt)
+dt.bw<-dt.bw[,c(3,1,2,5,4,7,6)]
+
+dt <- rbind(dt,dt.bw)
+```
+
+
+
+```{r plotting, dependson = "ny2", echo=F}
+# add more colors (for 13 boxplots)
+colourCount = length(unique(dt$Interval))
+getPalette = colorRampPalette(brewer.pal(9, "Set1"))
+
+
+#  VeDBA
+(p1<-ggplot(dt[dt$metricId=="VeDBA",], aes(x=Interval, y=metric,fill=HT)) + 
+  geom_boxplot(outlier.alpha = I(0.3),outlier.shape = 20)+
+  scale_fill_manual(values=c("palegoldenrod","thistle2","orchid"))+
+  labs(x="", y = "VeDBA (Normalized)")+ 
+  theme_minimal()+
+#  scale_y_continuous(limits = c(0,0.3))+
+  theme(axis.text.x = element_text(angle =45, vjust = 0.5, hjust=1),plot.title=element_text(hjust=0.5))+
+  facet_wrap(type~HT)+ guides(fill="none"))
+
+#  Jerk
+(p2<-ggplot(dt[dt$metricId=="Jerk",], aes(x=Interval, y=metric,fill=HT)) + 
+  geom_boxplot(outlier.alpha = I(0.3),outlier.shape = 20)+
+  scale_fill_manual(values=c("palegoldenrod","thistle2","orchid"))+
+  labs(x="", y = "Jerk (Normalized)")+ 
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=1),plot.title=element_text(hjust=0.5))+
+  facet_wrap(type~HT)+ guides(fill="none"))
+
+# #  VeDBA
+# (p1<-ggplot(dt, aes(x=Interval, y=VeDBA,fill=HT)) + 
+#   geom_boxplot(outlier.alpha = I(0.3),outlier.shape = 20)+
+#   scale_fill_manual(values=c("orchid","orchid"))+
+#   labs(x="", y = "VeDBA (g)")+ 
+#   theme_minimal()+
+#   theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=1),plot.title=element_text(hjust=0.5))+
+#   scale_y_continuous(limits=c(0,0.3))+
+#   facet_wrap(.~HT)+ guides(fill="none"))
+# 
+# #  Jerk
+# (p2<-ggplot(dt, aes(x=Interval, y=Jerk,fill=HT)) + 
+#   geom_boxplot(outlier.alpha = I(0.3),outlier.shape = 20)+
+#   scale_fill_manual(values=c("purple","purple"))+
+#   labs(x="hours (since tagging)", y = "Jerk (g/s)")+ 
+#   theme_minimal()+
+#   theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=1),plot.title=element_text(hjust=0.5))+
+#   scale_y_continuous(limits=c(0,10))+
+#   facet_wrap(.~HT)+ guides(fill="none"))
+
+
+g<-grid.arrange(p1,p2,top="Hourly distribution of VeDBA and Jerk",bottom="hours")
+ggsave("BP.pdf",plot=g,width=9,height=8,dpi=600)
+```
+
+

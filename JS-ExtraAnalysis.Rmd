@@ -1,0 +1,50 @@
+---
+title: 'Narwhales'
+author: 'Lars Reiter Nielsen'
+output:
+    html_document:
+      css: styles.css
+      highlight: pygments
+      code_folding: show
+      fig_height: 5
+      fig_width: 7
+      theme: readable
+#    toc: yes
+#  pdf_document:
+#    toc: yes
+
+---
+
+
+```{r init,echo=F,warning=F,include=F}
+library(ggplot2)   ## Grammar of graphics
+library(reshape2)  ## Reshaping data frames
+library(dplyr)     ## 
+library(data.table) ##
+library(readr)
+library(lattice)   ## More graphics
+library(hexbin)    ## and more graphics
+library(gridExtra) ## ... and more graphics
+library(xtable)    ## LaTeX formatting of tables
+library(splines)   ## Splines -- surprise :-)
+library(grid)      ## For 'unit'
+library(quantreg) ## quantile regression
+library(readxl)
+theme_set(theme_bw())
+
+```
+
+
+# Metode
+
+```{r}
+JS <- read_table2("JSstats.txt")
+JS2<-melt(JS,id="Interval")
+ggplot(JS2,aes(x=Interval,y=value, color=variable))+
+  geom_line(size=1)+
+  scale_color_manual(name="Lines",values=c("red","blue"),labels=c("Range of Normal Entropy","Mean of Normal entropy"))+
+  xlab("Sampling time interval (hours)")+
+  ylab("Cross entropy relative to TD distribution > 40 hours")+
+  theme(legend.position="bottom")
+ggsave("JSextra.pdf",width=7,height=5.5,dpi=600)
+```

@@ -1,0 +1,330 @@
+---
+title: 'Narwhales'
+author: 'Lars Reiter Nielsen'
+output:
+    html_document:
+      css: styles.css
+      highlight: pygments
+      code_folding: show
+      fig_height: 5
+      fig_width: 7
+      theme: readable
+#    toc: yes
+#  pdf_document:
+#    toc: yes
+
+---
+
+```{r set-options, echo=FALSE, cache=FALSE}
+#options(width = 1000)
+```
+
+
+```{r init,echo=F,warning=F,include=F}
+library(ggplot2)   ## Grammar of graphics
+library(reshape2)  ## Reshaping data frames
+library(dplyr)     ## 
+library(data.table) ##
+library(readr)
+library(lattice)   ## More graphics
+library(hexbin)    ## and more graphics
+library(gridExtra) ## ... and more graphics
+library(xtable)    ## LaTeX formatting of tables
+library(splines)   ## Splines -- surprise :-)
+library(grid)      ## For 'unit'
+library(quantreg) ## quantile regression
+library(readxl)
+theme_set(theme_bw())
+
+```
+
+
+# Metode: Kvantil regression
+
+```{r data klargøring, include=FALSE}
+# TODO: Correct time scale before run
+mult <- 1 # multiply hours by this factor
+
+# load data
+df0 <- read.table('Finalhours_GW.txt', sep="\t",header=TRUE)
+df <- df0 %>% select(hours,VeDBA=vedba,Jerk=jerk,Ind) # ignore depth column
+
+# Threshold for normal behaviour 
+th <- 10 #  10 hours threshold normal behaviour
+
+# Vedba/jerk: remove NA values
+dt <- as.data.table(df) # data table format
+dt <- na.omit(dt) # remove NA rows
+
+```
+
+Vi starter med at kigge på de empiriske fordelinger for hhv. log VeDBA og log Jerk
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(data = dt, aes(x = log(VeDBA), color = Ind)) +
+  geom_freqpoly() 
+ggplot(data = dt, aes(x = log(Jerk), color = Ind)) +
+  geom_freqpoly() 
+```
+
+
+Nu ser vi så på påvirkningen af de forskellige hvaler
+
+```{r echo=F}
+ggplot(data = dt, 
+       aes(x = hours, y = log(VeDBA),  
+       alpha = I(0.8))) +
+  geom_point(shape = ".") + 
+  xlab("Time") +
+  facet_wrap(~ Ind) 
+```
+
+
+
+
+
+```{r message=FALSE, warning=FALSE}
+
+alpha <- 1
+lw<-length(unique(dt$Ind)) # length of additive variable (eg. sizeId,Ind,Sex).# Zero if no additive variable
+
+vrq0 <-  rq(log(VeDBA) ~  1 , tau=c(0.5,0.9), data=dt) # vedba
+jrq0 <- rq(log(Jerk) ~  1, tau=c(0.5,0.9), data=dt) # jerk
+
+vrq <- rq(log(VeDBA) ~  Ind+I(1/(hours+alpha))-1 , tau=c(0.5,0.9), data=dt) # vedba
+jrq <- rq(log(Jerk) ~  Ind+I(1/(hours+alpha)) - 1, tau=c(0.5,0.9), data=dt) # jerk
+
+# Check R^1 (local R^2 measure of fit) for QR regression
+tau <- 0.9
+rq0 <-  rq(log(VeDBA) ~  1 , tau=tau, data=dt) # vedba
+rq1 <- rq(log(VeDBA) ~  Ind+I(1/(hours+alpha))-1 , tau=tau, data=dt)
+
+rho <- function(u,tau=tau)u*(tau - (u < 0))
+V <- sum(rho(rq1$resid, rq1$tau))
+V0 <- sum(rho(rq0$resid, rq0$tau))
+
+1-V/V0
+
+#### make F test of nested models ####
+tau <- 0.5
+rq.0 <- rq(log(VeDBA) ~ I(1/(hours+alpha))-1 , tau=tau, data=dt)
+rq.1 <- rq(log(VeDBA) ~ Ind+I(1/(hours+alpha))-1 , tau=tau, data=dt)
+anova(rq.0,rq.1)
+
+```
+
+```{r echo=F, warning=FALSE}
+# make VeDBA vs Time plot with fitted lines
+
+# vedba predictions
+dt$VQ90 <- exp(predict(vrq,newdata=dt))[,2]
+dt$VQ50 <- exp(predict(vrq,newdata=dt))[,1]
+# jerk predictions
+dt$JQ90 <- exp(predict(jrq,newdata=dt))[,2]
+dt$JQ50 <- exp(predict(jrq,newdata=dt))[,1]
+
+dt.pooled <- aggregate(
+  list(VQ50 = dt$VQ50,
+       VQ90 = dt$VQ90,
+       JQ50 = dt$JQ50,
+       JQ90 = dt$JQ90),
+  by=list(hours=dt$hours),
+  mean)
+
+dt.pooled2 <- aggregate(
+  list(VeDBA = dt$VeDBA,
+       Jerk = dt$Jerk),
+by=list(hours=dt$hours),
+  median)
+
+dt.q9 <- aggregate(
+  list(VeDBA.q9 = dt$VeDBA,
+       Jerk.q9 = dt$Jerk),
+  by=list(hours=dt$hours),
+  function(x)quantile(x,0.9))
+
+dt.pooled <- merge(dt.pooled,dt.pooled2)
+
+dt.pooled <- merge(dt.pooled,dt.q9)
+
+
+# plot for HT (VeDBA)
+hours.th <- 80 
+ggplot(dt.pooled[dt.pooled$hours < hours.th,],aes(x=hours))+
+  geom_jitter(data=dt[dt$hours<hours.th,],aes(x=hours,y=VeDBA),shape=20)+
+  geom_line(aes(y=VeDBA),colour="darkblue",linetype="solid")+
+  geom_line(aes(y=VeDBA.q9),colour="darkred",linetype="solid")+
+  geom_line(aes(y=VQ50),size=1,colour="blue")+
+  geom_line(aes(y=VQ90),size=1,colour="red")+
+  ylab("VeDBA (g)")
+#ggsave("QuantV1-BW.pdf",width=10,height=4.5,dpi=600)
+# plot for HT (Jerk)
+ggplot(dt.pooled[dt.pooled$hours < hours.th,],aes(x=hours))+
+  geom_jitter(data=dt[dt$hours<hours.th,],aes(x=hours,y=Jerk),shape=20)+
+  ylab("Jerk (g/s)")+
+  geom_line(aes(y=Jerk),colour="darkblue",linetype="solid")+
+  geom_line(aes(y=Jerk.q9),colour="darkred",linetype="solid")+
+  geom_line(aes(y=JQ50),size=1,colour="blue")+
+  geom_line(aes(y=JQ90),size=1,colour="red")
+#ggsave("QuantJ1-BW.pdf",width=10,height=4.5,dpi=600)
+```
+
+
+
+
+```{r Time VS Recovery, message=FALSE, warning=FALSE}
+#############################################
+#TODO: CHECK OM BEREGNINGEN STADIG HOLDER!
+############################################
+
+# Inverse time                               
+q <- seq(0.05,0.95,0.05)
+
+metrik.vec <- c("VeDBA","Jerk")
+tau.vec <- c("50%","90%")
+
+df.est <- data.frame(
+  metrik = rep(metrik.vec,each=2),
+  tau = rep(tau.vec,length.out=4),
+  CI.lower = NA,
+  CI.upper = NA,
+  estimate = NA
+)
+
+for(m in metrik.vec){
+    for(t in 1:2){
+      if(m=="VeDBA")
+        {df.est[df.est$metrik==m & df.est$tau==tau.vec[t],c("CI.lower","CI.upper","estimate")]<-c(summary(vrq,se="rank")[[t]][3][[1]][lw+1,c(2,3)],vrq$coefficients[lw+1,t])}
+      if(m=="Jerk")
+        {df.est[df.est$metrik==m  & df.est$tau==tau.vec[t],c("CI.lower","CI.upper","estimate")]<-c(summary(jrq,se="rank")[[t]][3][[1]][lw+1,c(2,3)],jrq$coefficients[lw+1,t])}
+  }
+}
+
+# auxilliary functions
+posOnly <- Vectorize(function(x) ifelse(x>0,x,0))
+minOf <- Vectorize(function(x,y) min(x,y))
+maxOf <- Vectorize(function(x,y) max(x,y))
+
+
+reps <- 2*2 # tau*metriks
+df0 <- data.frame(
+  q = rep(q,reps), # 1st level 
+  t = rep(q,reps), # 1st level
+  Ut = rep(q,reps), # 1st level
+  Lt = rep(q,reps), # 1st level
+  tau = rep(tau.vec,each=((reps/2)*length(q))), # 2nd level
+  metrik = rep(rep(metrik.vec,each=length(q)),2) # 3rd level
+)
+
+# CONSTRUCT dataframe for plotting (containing Time, CI of Time)
+for(m in metrik.vec){
+    for(t in tau.vec){
+      e <- df.est[df.est$metrik==m  & df.est$tau==t,]$estimate
+      e.l <- df.est[df.est$metrik==m  & df.est$tau==t,]$CI.lower
+      e.u <- df.est[df.est$metrik==m  & df.est$tau==t,]$CI.upper
+      
+      
+      # estimate:
+      df0[df0$metrik==m  & df0$tau==t,]$t <- posOnly(-abs(e)/log(q))
+      
+      #CI lower and CI upper:
+      if(e<0){
+        df0[df0$metrik==m  & df0$tau==t,]$Lt<- posOnly(e.u/log(q))
+        df0[df0$metrik==m  & df0$tau==t,]$Ut<- posOnly(e.l/log(q))
+      }
+      else
+      {
+        df0[df0$metrik==m  & df0$tau==t,]$Ut<- posOnly(-e.u/log(q))
+        df0[df0$metrik==m  & df0$tau==t,]$Lt<- posOnly(-e.l/log(q))
+      }
+  }
+}
+
+
+
+# VeDBA
+pV<-ggplot(df0[df0$metrik=="VeDBA",],aes(x=q))+
+  geom_ribbon(aes(ymin=Lt,ymax=Ut),alpha=I(0.2),fill="chartreuse2",color="chartreuse4")+
+  geom_line(aes(y=t),size=0.5,color="chartreuse4")+
+  ylab("hours (since tagging)")+
+  xlab("Percentage of VeDBA under normal behavior")+
+#  ggtitle("Quantile regression: VeDBA")+
+  theme(plot.title=element_text(hjust=0.5))+
+  facet_wrap(.~tau)
+#ggsave("QuantV2.pdf",width=8,height=4.5,dpi=600)
+# Jerk
+pJ<-ggplot(df0[df0$metrik=="Jerk",],aes(x=q))+
+  geom_ribbon(aes(ymin=Lt,ymax=Ut),alpha=I(0.2),fill=I("brown1"),color="brown4")+
+  geom_line(aes(y=t),size=0.5,color="brown4")+
+  ylab("hours (since tagging)")+
+  xlab("Percentage of Jerk under normal behavior")+
+#  ggtitle("Quantile regression: Jerk")+
+  theme(plot.title=element_text(hjust=0.5))+
+  facet_wrap(.~tau)
+#ggsave("QuantJ2.pdf",width=8,height=4.5,dpi=600)
+
+g<-grid.arrange(pV,pJ,top="Hourly change towards normal behaviour for (N=4) bowhead whales")
+ggsave("QuantVnJ-BW.pdf",plot=g,width=9,height=8,dpi=600)
+```
+
+
+
+```{r}
+# anominize whales
+dt[dt$Ind=="Ting2"]$Ind <- "BW1"
+dt[dt$Ind=="Sung1"]$Ind <- "BW2"
+pfitv <- ggplot(dt[dt$Ind %in% c("BW1","BW2")],aes(x=hours))+
+  geom_point(aes(y=VeDBA),alpha=I(0.5))+
+  geom_line(aes(y=VQ50),size=0.5,colour="blue")+
+  geom_line(aes(y=VQ90),size=0.5,colour="red")+
+  xlab("")+
+  ylab("VeDBA (g)")+
+  facet_wrap(Ind~.,scales="free")
+pfitj <- ggplot(dt[dt$Ind %in% c("BW1","BW2")],aes(x=hours))+
+  geom_point(aes(y=Jerk),alpha=I(0.5))+
+  geom_line(aes(y=JQ50),size=0.5,colour="blue")+
+  geom_line(aes(y=JQ90),size=0.5,colour="red")+
+  ylab("Jerk (g/s)")+
+  facet_wrap(Ind~.,scales="free")
+g<-grid.arrange(pfitv,pfitj,top="Quantile fit example for N=2 bowhead whales")
+ggsave("Quantfit-BW.pdf",plot=g,width=9,height=8,dpi=600)
+```
+
+```{r}
+save(df0,file="QR-BW.RDa")
+save(dt,file="QRfit-BW.RDa")
+```
+
+
+
+Nedenfor er blå 50% fraktilen og rød 90% fraktilen.
+
+
+
+
+```{r echo=F, warning=FALSE}
+ggplot(dt,aes(x=hours))+
+  geom_point(aes(y=VeDBA),alpha=I(0.2))+
+  geom_line(aes(y=VQ50),size=0.5,colour="blue")+
+  geom_line(aes(y=VQ90),size=0.5,colour="red")+
+  facet_wrap(.~Ind,scales="free")
+#ggsave("QuantWhalesV.pdf",width=11,height=8,dpi=600)
+ggplot(dt,aes(x=hours))+
+  geom_point(aes(y=Jerk),alpha=I(0.2))+
+  geom_line(aes(y=JQ50),size=0.5,colour="blue")+
+  geom_line(aes(y=JQ90),size=0.5,colour="red")+
+  facet_wrap(.~Ind,scales="free")
+#ggsave("QuantWhalesJ.pdf",width=11,height=8,dpi=600)
+```
+
+
+```{r}
+df00<-df0[df0$q<0.79 & df0$q>0.71,]
+df00 <-mutate(df00,t=round(t,2),Ut=round(Ut,2),Lt=round(Lt,2))
+colnames(df00)<-c("q","hours","hours.lower","hours.upper","percentile","metric")
+write.table(df00,file="returntime-BW.txt",sep=",",row.names=F)
+```
+
+
+

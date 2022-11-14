@@ -1,0 +1,198 @@
+---
+title: 'Narwhales'
+author: 'Lars Reiter Nielsen'
+output:
+    html_document:
+      css: styles.css
+      highlight: pygments
+      code_folding: show
+      fig_height: 5
+      fig_width: 7
+      theme: readable
+#    toc: yes
+#  pdf_document:
+#    toc: yes
+
+---
+
+```{r set-options, echo=FALSE, cache=FALSE}
+#options(width = 1000)
+```
+
+
+```{r init,echo=F,warning=F,include=F}
+library(ggplot2)   ## Grammar of graphics
+library(reshape2)  ## Reshaping data frames
+library(dplyr)     ## 
+library(data.table) ##
+library(readr)
+library(lattice)   ## More graphics
+library(hexbin)    ## and more graphics
+library(gridExtra) ## ... and more graphics
+library(xtable)    ## LaTeX formatting of tables
+library(splines)   ## Splines -- surprise :-)
+library(grid)      ## For 'unit'
+library(quantreg) ## quantile regression
+library(readxl)
+theme_set(theme_bw())
+
+```
+
+
+# Metode: Kvantil regression
+
+```{r data klargøring, include=FALSE}
+load("QR-BW.Rda")
+df0.BW <- df0
+load("QRfit-BW.Rda")
+dt.bw <- dt
+load("QR-NW.Rda")
+load("QRfit-NW.Rda")
+
+# configure dataframe for quantile plots
+df0.BW$type <- "All bowhead whales"
+colnames(df0) <- c("q","t","Ut","Lt","tau","type","metrik")
+df0.BW <- df0.BW[,c(1,2,3,4,5,7,6)]
+df0[df0$type=="Long handlingtime",]$type <-"Narwhals: Long handlingtime"
+df0[df0$type=="Short handlingtime",]$type <-"Narwhals: Short handlingtime"
+df0.BW$whale <- "Bowhead whales"
+df0$whale <- "Narwhals"
+df0 <- rbind(df0,df0.BW)
+df0[df0$tau=="50%",]$tau <- "tau=50%"
+df0[df0$tau=="90%",]$tau <- "tau=90%"
+
+# trim dataframe - "fake data" for scale
+dfextra <- df0[df0$q=="0.05",]
+dfextra$q  <- NA
+dfextra[,2:4] <- c(50,50,50)
+df0<-rbind(df0,dfextra)
+
+# trim dataframe - trimmax
+bwtrim <- 30
+nwvedbatrim <- 25
+nwjerktrim <- 20
+minmax <- Vectorize(function(x,trimx) ifelse(x>trimx,trimx, x))
+df0[df0$type=="All bowhead whales",]$t <- minmax(df0[df0$type=="All bowhead whales",]$t,bwtrim)
+df0[df0$type=="All bowhead whales",]$Lt <- minmax(df0[df0$type=="All bowhead whales",]$Lt,bwtrim)
+df0[df0$type=="All bowhead whales",]$Ut <- minmax(df0[df0$type=="All bowhead whales",]$Ut,bwtrim)
+df0[df0$metrik=="VeDBA" & df0$type!="All bowhead whales" ,]$t <- minmax(df0[df0$metrik=="VeDBA" & df0$type!="All bowhead whales",]$t,nwvedbatrim)
+df0[df0$metrik=="VeDBA" & df0$type!="All bowhead whales" ,]$Lt <- minmax(df0[df0$metrik=="VeDBA" & df0$type!="All bowhead whales",]$Lt,nwvedbatrim)
+df0[df0$metrik=="VeDBA" & df0$type!="All bowhead whales" ,]$Ut <- minmax(df0[df0$metrik=="VeDBA" & df0$type!="All bowhead whales",]$Ut,nwvedbatrim)
+df0[df0$metrik=="Jerk" & df0$type!="All bowhead whales" ,]$t <- minmax(df0[df0$metrik=="Jerk" & df0$type!="All bowhead whales",]$t,nwjerktrim)
+df0[df0$metrik=="Jerk" & df0$type!="All bowhead whales" ,]$Lt <- minmax(df0[df0$metrik=="Jerk" & df0$type!="All bowhead whales",]$Lt,nwjerktrim)
+df0[df0$metrik=="Jerk" & df0$type!="All bowhead whales" ,]$Ut <- minmax(df0[df0$metrik=="Jerk" & df0$type!="All bowhead whales",]$Ut,nwjerktrim)
+
+# configure dataframe for combined quantile fit plot
+dt.bw$type <- "BW"
+dt$type <- "NW"
+dt$ODBA <- NULL
+dt$sizeId <- NULL
+dt$Sex <- NULL
+dt$HT <- NULL
+dt$OQ50 <- NULL
+dt$OQ90 <- NULL
+dt.bw <- dt.bw[,c(4,1,2,3,5,6,7,8,9)]
+dt <- rbind(dt,dt.bw)
+dt <- dt[dt$Ind %in% c("NW16","NW20","BW1","BW2"),]
+dt.jerk <- dt[,c(1,2,4,7,8,9)]
+dt.vedba <- dt[,c(1,2,3,5,6,9)]
+colnames(dt.jerk) <- c("Ind","hours","metric","Q90","Q50","type")
+colnames(dt.vedba) <- c("Ind","hours","metric","Q90","Q50","type")
+dt.jerk$metricId <- "Jerk (g/s)"
+dt.vedba$metricId <- "VeDBA (g)"
+dt <- rbind(dt.vedba,dt.jerk)
+
+# get minutes dataframe (narwhals)
+dt2.NW <- read.table("Finalmin-New.txt",sep="\t",header=TRUE)
+dt2.NW <- dt2.NW %>% select(hours=min,VeDBA=vedba,Jerk=jerk,Ind)
+dt2.NW$hours <- dt2.NW$hours/60
+dt2.NW$type <- "NW"
+dt2.NW.dummy <- dt2.NW[,c(1,2,4,5)]
+colnames(dt2.NW.dummy) <- c("hours","Jerk","Ind","type")
+dt2.NW <- rbind(dt2.NW.dummy,dt2.NW[,c(1,3,4,5)])
+colnames(dt2.NW) <- c("hours","metric","Ind","type")
+dt2.NW$metricId <- rep(c("VeDBA (g)","Jerk (g/s)"),each=nrow(dt2.NW.dummy))
+
+# get minutes dataframe (bowhead whales)
+dt2.BW <- read.table("Finalmin_GW.txt",sep="\t",header=TRUE)
+dt2.BW <- dt2.BW %>% select(hours=min,VeDBA=vedba,Jerk=jerk,Ind)
+dt2.BW$hours <- dt2.BW$hours/60
+dt2.BW$type <- "BW"
+dt2.BW.dummy <- dt2.BW[,c(1,2,4,5)]
+colnames(dt2.BW.dummy) <- c("hours","Jerk","Ind","type")
+dt2.BW <- rbind(dt2.BW.dummy,dt2.BW[,c(1,3,4,5)])
+colnames(dt2.BW) <- c("hours","metric","Ind","type")
+dt2.BW$metricId <- rep(c("VeDBA (g)","Jerk (g/s)"),each=nrow(dt2.BW.dummy))
+
+
+dt2 <- rbind(dt2.NW,dt2.BW)
+
+dt2[dt2$Ind=="Kyrri",]$Ind <- "NW16"
+dt2[dt2$Ind=="Eistla",]$Ind <- "NW20"
+dt2[dt2$Ind=="Ting2",]$Ind <- "BW1"
+dt2[dt2$Ind=="Sung1",]$Ind <- "BW2"
+
+```
+
+
+```{r}
+
+```
+
+
+
+```{r}
+#### Example of Quantile fit ####
+# anominize whales
+(pfitv <- ggplot(dt[dt$Ind %in% c("BW1","BW2")],aes(x=hours))+
+  geom_jitter(data=dt2[dt2$Ind %in% c("BW1","BW2"),],aes(y=metric),alpha=I(0.1),color="gray0",shape=20)+
+#  geom_point(aes(y=metric),alpha=I(0.5))+
+  geom_line(aes(y=Q50),size=0.6,colour="blue")+
+  geom_line(aes(y=Q90),size=0.6,colour="red")+
+  xlab("hours")+
+  ylab("")+
+  facet_grid(metricId~Ind,scales="free")+
+  theme(strip.text.x = element_text(size=10),
+          strip.text.y = element_text(size=10),
+          strip.background = element_rect(colour="black", fill="palegoldenrod")))
+(pfitj <- ggplot(dt[dt$Ind %in% c("NW16","NW20")],aes(x=hours))+
+#  geom_point(aes(y=metric),alpha=I(0.5))+
+  geom_jitter(data=dt2[dt2$Ind %in% c("NW16","NW20"),],aes(y=metric),alpha=I(0.05),color="gray0",shape=20)+
+  geom_line(aes(y=Q50),size=0.6,colour="blue")+
+  geom_line(aes(y=Q90),size=0.6,colour="red")+
+  xlab("hours")+
+  ylab("")+
+  facet_grid(metricId~Ind,scales="free")+
+  theme(strip.text.x = element_text(size=10),
+          strip.text.y = element_text(size=10),
+          strip.background = element_rect(colour="black", fill="thistle2")))
+g<-grid.arrange(pfitv,pfitj,top="Quantile fit example for N=2 bowhead whales (Left) and N=2 narwhals (Right)",ncol=2)
+ggsave("Quantfit-NWBW.pdf",plot=g,width=12,height=5.5,dpi=600)
+```
+
+
+```{r Time VS Recovery, message=FALSE, warning=FALSE}
+#### Quantile regress to normal behaviour ####
+# VeDBA
+pV<-ggplot(df0[df0$metrik=="VeDBA",],aes(x=q))+
+  geom_ribbon(aes(ymin=Lt,ymax=Ut,fill=whale),alpha=I(0.5),color="black",size=0.5)+
+  geom_line(aes(y=t),size=0.5,color="black")+
+  scale_fill_manual(values=c("palegoldenrod","thistle2"))+
+  facet_wrap(tau~type,scale="free")+
+  ylab("Time since tagging (hours)")+
+  xlab("Percentage of VeDBA under normal behavior")+
+  theme(plot.title=element_text(hjust=0.5),legend.position = "none")
+# Jerk
+pJ<-ggplot(df0[df0$metrik=="Jerk",],aes(x=q))+
+  geom_ribbon(aes(ymin=Lt,ymax=Ut,fill=whale),alpha=I(0.5),color="black",size=0.5)+
+  geom_line(aes(y=t),size=0.5,color="black")+
+  scale_fill_manual(values=c("palegoldenrod","thistle2"))+
+  facet_wrap(tau~type,scale="free")+
+  ylab("Time since tagging (hours)")+
+  xlab("Percentage of Jerk under normal behavior")+
+  theme(plot.title=element_text(hjust=0.5),legend.position = "bottom")
+
+g<-grid.arrange(pV,pJ)
+ggsave("QuantVnJ-NWBW.pdf",plot=g,width=10,height=8,dpi=600)
+```
+

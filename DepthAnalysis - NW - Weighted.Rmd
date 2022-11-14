@@ -1,0 +1,929 @@
+---
+title: 'Narwhals'
+author: 'Lars Reiter Nielsen'
+output:
+    html_document:
+      css: styles.css
+      highlight: pygments
+      code_folding: show
+      fig_height: 5
+      fig_width: 10
+      theme: readable
+#    toc: yes
+#  pdf_document:
+#    toc: yes
+
+---
+
+```{r init,echo=F,warning=F,include=F}
+library(ggplot2)   ## Grammar of graphics
+library(reshape2)  ## Reshaping data frames
+library(dplyr)     ## 
+library(data.table) ##
+library(readr)
+library(lattice)   ## More graphics
+library(hexbin)    ## and more graphics
+library(gridExtra) ## ... and more graphics
+library(xtable)    ## LaTeX formatting of tables
+library(splines)   ## Splines -- surprise :-)
+library(grid)      ## For 'unit'
+library(latex2exp)
+library(tinytex)
+library(readxl)
+library(stringr)
+library(segmented) # segmented regression
+library(tseriesEntropy)
+theme_set(theme_bw())
+
+```
+
+
+# Metode: Depth diagrams and Jensen-Shannon/Kulback-Leibler
+
+Nedenfor betragter vi tidsintervaller á 3 timers varighed. Normalområdet er sat fra 51 timer og op til 60 timer (herefter har vi mistet for mange hvaler til at normalområdet ikke præges af individ bias). I hvert interval, har vi tilføjet 1/1000 (svarende til 0.1%) sandsynlighed til hvert target depth felt, for at undgå numeriske problemer ved beregning af Kullback-leibler divergensen.
+
+Jensen-Shannon divergensen benævnt JSD (en glat og endelig udgave af Kullback-leibler målet) udregnet ved hvert interval. 
+
+JSD plottes til sidst, hvor vi har beregnet det for alle hvaler, og hvaler sepereret ud på "long" (=>60 minutter) og "short" (<60 minutters) handlingtime.
+
+Bemærk: Valget af 2 grupper (i stedet for short, medium,long) var kun et eksperimenterende valg.
+
+```{r data klargøring, echo=FALSE}
+
+#### Load data ####
+df <- read.table('Finalmin-NW-new.txt', sep="\t",header=TRUE)
+df <- df %>% dplyr::select(min, Depth,Ind) # ignore depth column
+dt <- as.data.table(df) # data table format
+dt<-na.omit(dt)
+
+
+#### Initialize data ####
+
+# handling times
+HTdf <- read_excel("HT.xlsx")
+whales <- unique(dt$Ind)
+maleNames <- c('Asgeir','Balder','Helge','Thor','Kyrri','Siggi','Nemo','Frederik','Eske','Bjarne')
+HTdf <- HTdf[HTdf$Ind %in% whales,]
+colnames(HTdf)<-c("Ind","handlingtime","size")
+HTdf <- mutate(HTdf,HT=ifelse(HTdf$handlingtime < 56, "Short","Long"),
+               sizeId = ifelse(HTdf$size < quantile(HTdf$size,0.25),1,ifelse(HTdf$size<quantile(HTdf$size,0.75),2,3)),
+               Sex = ifelse(HTdf$Ind %in% maleNames,"Male","Female"))
+  
+# remove "Mara" from analysis (only 9 hours of sample data)
+#dt <- dt[dt$Ind != "Mara",]
+# remove unused columns
+dt[,Buzz:=NULL]
+## remove NA rows
+#dt <- na.omit(dt) # remove NA rows
+
+
+# set handling time and sex
+dt<- mutate(dt,
+            sex = ifelse(dt$Ind %in% maleNames, "M","F"),
+            depthlvl = floor(abs(dt$Depth)/20),  # depth level = interval of 20
+            TD = rep(0,nrow(dt)),
+            TDD = rep(0,nrow(dt)))
+
+
+#### add "Target Depth" (TD) and "Target Depth Duration" (TDD) ####
+
+#' Remove consecutive dublicates of depthlvl. 
+#' X and Y contains two elements (values = Depthlvl)
+#' and (lengths = Occurences of values)
+X <- rle(dt$depthlvl) 
+
+# IMPORTANT: Ensure that X starts and end in a dive, otherwise the lengths of dummy1 and 2 should be corrected
+maxdepthlvl <- max(X$values)
+surfaceidx <- which(X$values %in% c(0))
+
+# The dummy variables depend upon the TAIL and FRONT (if we start/end at surface)
+front.idx <- X$values[1]>0
+tail.idx <- tail(X$values,1)>0
+dummy.L <- 2*length(surfaceidx)+1 # dummy length
+if(tail.idx != front.idx ){dummy.L <- 2*length(surfaceidx)} 
+# ILLUSTRATION of the principle on the 4 lines above:
+#   0 1 0 1 0 
+#   1 0 1 0 1
+#   0 1 0 1
+#   1 0 1 0 
+# Here 0 represents "surface" and 1 represents "dive". Hence if we are at surface at the start
+# and dive in the end or vice versa, the length is only 2*surface length.
+dummy1 <- rep(0,dummy.L) # initiate dummy for TD
+dummy2 <-rep(0,dummy.L) # initiate dummy for TDD
+
+
+
+# Dummy variable for Target Depth
+if (front.idx == 0){
+  dummy1[1] <- 0
+  for(i in 2:(length(surfaceidx))){
+    # get max depth between two consecutive surface lvls
+    dummy1[2*(i-1)] <- max(X$values[surfaceidx[i-1]:surfaceidx[i]]) 
+  }
+}
+
+if (front.idx == 1){
+  dummy1[1] <- max(X$values[1:surfaceidx[1]])
+  for(i in 2:(length(surfaceidx))){
+    # get max depth between two consecutive surface lvls
+    dummy1[2*i-1] <- max(X$values[surfaceidx[i-1]:surfaceidx[i]]) 
+  }
+}
+
+if (tail.idx==1) dummy1[dummy.L] <- max(X$values[surfaceidx[length(surfaceidx)]:length(X$values)])
+
+
+# Dummy variable for Dive Duration
+dummy2[1] <- X$lengths[1] # initiate
+m <- 1 # m is updated according to which "dive" we are inside
+
+# loop over X lengths, and update accordingly
+for(k in 1:length(X$lengths)){
+    # if we are at the surface, add the numbers of surface ticks
+    if(X$values[k]==0){      
+     if (k!=1){m <- m+1} # new "surface dive"
+     dummy2[m] <- X$lengths[k]
+     m <- m+1 # begin new "other" dive
+    }
+    # else, we are diving and we add the length of the specific depth to TDD
+    else{ 
+      dummy2[m] <- dummy2[m] + X$lengths[k]
+    }
+  }
+    
+# update target depth and target depth duration
+# nb: -1 to adjust for the 1st minute missing (remove 1st element)
+dt$TD <- rep(dummy1,dummy2)
+dt$TDD <- rep(dummy2,dummy2)
+
+shallow.th <- 8 # SHALLOW dives are defined to be between 15 and 8*15 = 120 meters
+medium.th <- 17 # MEDIUM dives are defined to be between 120 and 17*15 = 340 meters
+
+dt <- mutate(dt, dive = ifelse(TD==0,"surface",
+                               ifelse(TD < shallow.th, "shallow",
+                                                ifelse(TD < medium.th, "medium", "deep"))),
+             dummyS = ifelse(TD==0,1/TDD,0), # for computing surface per hour
+             dummyShallow = ifelse(TD >0 & TD <= shallow.th, 1/TDD,0), # for computing shallow dives per hour
+             dummyMedium = ifelse(TD > shallow.th & TD <= medium.th, 1/TDD,0),
+             dummyDeep = ifelse(TD>medium.th,1/TDD,0)) # for computing deep dives per hour
+
+# remove unused columns
+dt[,Depth:=NULL]
+dt[,buzz:=NULL]                                                                                     
+
+# length (minutes - 1) of observations for all whales
+ll <- aggregate(dt$min,list(dt$Ind),length)$x+1 # actual length
+lu <- cumsum(ll+60-ll %% 60) # extended length (if ll should be a multiple of 60)
+
+# the below vector is used to remove overflow of observations
+l <- c(ll[1]:lu[1])
+for(i in 2:length(ll)) l <- c(l,(lu[i-1]+ll[i]):lu[i])
+
+# vector to be used later (corrected to the actual numbers of observations)
+vecDummy <- rep(seq(1, nrow(dt)), each = 60)
+vecDummy<-vecDummy[-l] # remove overflow observations
+vecDummy <- vecDummy[1:nrow(dt)] # chop at tail
+
+
+# COUNT the number of shallow dives every 60 min (shallow dives per hour)
+dt$shallow.count <- ave(dt$dummyShallow, vecDummy, 
+                        FUN = function(x) sum(x))
+dt$shallow.time <- ave(dt$dummyShallow, vecDummy, 
+                        FUN = function(x) sum(x>0)/60)
+
+# COUNT the number of medium dives every 60 min (medium dives per hour)
+dt$medium.count <- ave(dt$dummyMedium, vecDummy, 
+                        FUN = function(x) sum(x))
+dt$medium.time <- ave(dt$dummyMedium, vecDummy, 
+                        FUN = function(x) sum(x>0)/60)
+
+
+# COUNT the number of deep dives every 60 min (deep dives per hour)
+dt$deep.count <- ave(dt$dummyDeep, 
+                        vecDummy, 
+                        FUN = function(x) sum(x))
+dt$deep.time <- ave(dt$dummyDeep, 
+                        vecDummy, 
+                        FUN = function(x) sum(x>0)/60)
+
+# remove unused columns
+dt[,dummyDeep:=NULL]
+dt[,dummyShallow:=NULL]   
+
+# create hourly data frame
+dt.H <-aggregate(list(Ind=dt$Ind,
+                      shallow.count=dt$shallow.count,
+                      shallow.time=dt$shallow.time,
+                      medium.count=dt$medium.count,
+                      medium.time=dt$medium.time,
+                      deep.count = dt$deep.count,
+                      deep.time =dt$deep.time),
+                 by=list(hours=vecDummy),
+                 FUN=function(x) unique(x))
+
+wh <- rle(dt.H$Ind)$lengths # whale hours
+lw <- c(1:wh[1])
+for(i in 2:length(wh)) lw <- c(lw,1:wh[i])
+dt.H$hours <- lw # update whale hours (correct format)
+
+## OPTIONAL: We can now choose to center our new depth variables with the long time average
+## where long time average is above 30*60 minutes (30 hours)
+
+#long.df <- dt[dt$min>60*30,] %>% group_by(Ind) %>% summarize(deep.long=mean(deep.count/TDD)*60,
+#                                                             shallow.long = #mean(shallow.count/TDD)*60)
+#for(w in long.df$Ind){
+#  dt[dt$Ind==w,]$shallow.count <- dt[dt$Ind==w,]$shallow.count - #long.df[long.df$Ind==w,]$shallow.long
+#  dt[dt$Ind==w,]$deep.count <- dt[dt$Ind==w,]$deep.count - long.df[long.df$Ind==w,]$deep.long
+#}
+
+#### plot handling times ####
+ggplot(HTdf,aes(x=handlingtime,y=rep(1,18),
+                size=as.factor(sizeId),
+                color=Sex,
+                shape=Sex))+
+         geom_point()+
+  geom_vline(aes(xintercept=mean(HTdf$handlingtime)),col="darkblue",size=1)+
+  scale_x_continuous("Handlingtime (minutes)",breaks=c(20,30,40,50,60,70,80,90))+
+  scale_y_continuous("",breaks=c(),limits=c(0,2))+
+  scale_size_manual("Size",values=c(3,6,11),labels=c("Small","Medium","Big"))+annotate("text", x = 35, y = 1.5, label = "Short handling",size=5,family="Helvetica")+annotate("text", x = 75, y = 1.5, label = "Long handling",size=5,family="Helvetica")+scale_color_manual(values = c("red","blue"))+scale_shape_manual(values=c(2,0))
+#  theme(legend.position="bottom",plot.title=element_text(hjust=0.5))
+ 
+#ggsave("HTWhales.pdf",width=12,height=5.5,dpi=600)
+
+## remove columns (optional)
+HTdf$handlingtime <- NULL
+HTdf$size <- NULL
+HTdf$sizeId <-NULL
+HTdf$Sex <- NULL
+
+```
+
+
+
+```{r echo=FALSE}
+#### GLOBAL SETTINGS ####
+
+# Remove whales with sample duration < 40hrs
+# since they are not represented in normal area (>40hrs)
+# should we do this?
+#dt <- dt[!(dt$Ind %in% c("Bjarne","Eske","Mara")),]
+
+# RESTRICT to data less than th hours (otherwise we lose too many whales in the tail)
+#th <- 80 # set this to 57?
+#dt <- dt[dt$min < th*60+2,] # + 2 is because we start at 2nd minute
+
+# add handling time and set FOCUS for handling
+dt <- merge(dt,HTdf,by="Ind")
+dt.short <- dt[dt$HT == "Short",] 
+dt.long <- dt[dt$HT == "Long",] 
+
+###########################################################
+#### SET TIME/TD INTERVAL LENGTH AND TIME/TD INTERVALS ####
+###########################################################
+
+M <-1 # TIME interval length
+nInts <- 40 # number of intervals to use 
+# THE CHOICE IS BECAUSE THAT WE HAVE WHALES THAT LOSES TAG < 60hrs, THUS THEY ARE PARTLY REPRESENTED
+# IN THE DATA
+# NOTE: remaining hours after M*nInts is used as normal area. i.e. th - M*nInts is normal sampling area.
+
+N <- 8 # number of quantiles
+qts <- quantile(dt[dt$min>M*nInts & dt$TD!=0,]$TD,1/N*1:N) # normal area quantiles for all whales
+md <- max(dt$TD) # max target depth (for all whales!)
+# OR set custom Quantiles (Shallow,Medium, Deep)
+qts <- c(1,8,18,md)
+N<-length(qts)
+
+
+correction <- 0 # probability to add at each TD in tail/normal area
+
+ggplot(dt[dt$TD!=0 & dt$min<80*60,],aes(min,TD))+
+  ggtitle("Target Depth progression for all N=20 narwhals")+
+  geom_point(color="cornflowerblue",alpha=I(0.1))+
+  geom_line(aes(x=M*nInts*60),color="red",size=1)+
+  scale_x_continuous("hours", breaks=600*0:8, labels=paste(10*0:8))+
+  scale_y_continuous("Target depth (meters)", breaks=seq(0,45,5), labels=20*seq(0,45,5))+
+  theme(legend.position="bottom",plot.title=element_text(hjust=0.5))
+  
+ggsave("TDevol.pdf",width=10,height=5.5,dpi=600)
+```
+
+
+
+# Jensen-Shannon divergens
+
+![Caption for the picture.](jsd.png)
+
+$P \equiv P_t$ er dive duration fordelingen til tidsintervallet $t$. $Q$ er fordelingen i normalområdet.
+
+
+## Cross validation / Leave-one-out til estimation af 95% CI for normalområde
+
+```{r}
+#### ONLY RELEVANT IF MORE HANDLING TIME IS USED ####
+
+# Long tagging whales
+lwhales <- unique(dt[dt$HT=="Long"]$Ind)
+tdrop.l <- sort(round(aggregate(df[df$min>nInts*M*60 & df$Ind %in% lwhales ,]$min,list(df[df$min>nInts*M*60 & df$Ind %in% lwhales,]$Ind),function(x)length(x)/60)$x))+nInts*M
+Nwhales.l <- length(lwhales) # number of whales
+nt.l <- Nwhales.l + 1 - cumsum(rle(tdrop.l)$lengths) # number of whales before each drop point
+tdrop.l <- rle(tdrop.l)$values # remove dublicates
+tdist.l <- tdrop.l-shift(tdrop.l,1) # distance between drops
+tdist.l[1] <-tdrop.l[1]-nInts*M
+tdist.l <- tdist.l/sum(tdist.l) # relative distance
+
+Qweights.l <- nt.l**2*tdist.l # weight(t) = nt^3*tdist
+Qweights.l <- Qweights.l/sum(Qweights.l)
+
+# weight function
+weight.func.l <- function(t){
+  imax <- length(Qweights.l) # number of weights
+  for(i in 1:imax)if(t<=tdrop.l[i])return(Qweights.l[i])
+}
+
+
+# Short tagging whales
+swhales <- unique(dt[dt$HT=="Short"]$Ind)
+tdrop.s <- sort(round(aggregate(df[df$min>nInts*M*60 & df$Ind %in% swhales ,]$min,list(df[df$min>nInts*M*60 & df$Ind %in% swhales,]$Ind),function(x)length(x)/60)$x))+nInts*M
+Nwhales.s <- length(swhales) # number of whales
+nt.s <- Nwhales.s + 1 - cumsum(rle(tdrop.s)$lengths) # number of whales before each drop point
+tdrop.s <- rle(tdrop.s)$values # remove dublicates
+tdist.s <- tdrop.s-shift(tdrop.s,1) # distance between drops
+tdist.s[1] <-tdrop.s[1]-nInts*M
+tdist.s <- tdist.s/sum(tdist.s) # relative distance
+
+Qweights.s <- nt.s**2*tdist.s # weight(t) = nt^3*tdist
+Qweights.s <- Qweights.s/sum(Qweights.s)
+
+# weight function
+weight.func.s <- function(t){
+  imax <- length(Qweights.s) # number of weights
+  for(i in 1:imax)if(t<=tdrop.s[i])return(Qweights.s[i])
+}
+```
+
+
+```{r echo=F,message=F,warning=F}
+#### CROSS VALIDATION SETUP ####
+
+
+#######################
+#### INITIAL SETUP ####
+#######################
+
+th <- 40
+# create dataframe skeleton for DEPTH GRID
+DT.all <- data.frame(Interval=rep(rep(1:(th),each=(N-1),2)),
+                  TD=rep(rep(1:(N-1),(th)),2),
+                  TDD=rep(rep(0,(N-1)*(th)),2),
+                  HT=rep(c("Short (N=5)","Long (N=10)"),each=th*(N-1)))
+
+Nt <- nInts # hypothesized normal area
+dt.N <- dt[dt$min>Nt*M*60 & dt$TD!=0] # Target depth in hypothesized normal area (excluding surface)
+
+## Auxillary function 1: Map TD and TD-quantile intervals
+qMap <- Vectorize(function(x){
+  # return the corresponding quantile-interval of TD x
+  return(max(qts[2],qts[which(qts-x>=0)[1]]))
+})
+
+## Auxilliary function 2: Kullback Leibler
+KB <- function(p,q){
+  # Kullback Leibler Divergence #
+  # if p(X)=0,then KB contribution is zero (per definition; see
+  # wiki and Kullback Leibler Definition):
+  sum(p*log(p/q),na.rm=T)
+} 
+
+
+#####################################
+#### CALCULATE WEIGHTS WHEN TAGS DROP
+#####################################
+
+
+# All whales
+tdrop <- sort(round(aggregate(df[df$min>nInts*M*60,]$min,list(df[df$min>nInts*M*60,]$Ind),function(x)length(x)/60)$x))+nInts*M
+Nwhales <- length(unique(dt$Ind)) # number of whales
+nt <- Nwhales + 1 - cumsum(rle(tdrop)$lengths) # number of whales before each drop point
+tdrop <- rle(tdrop)$values # remove dublicates
+tdist <- tdrop-shift(tdrop,1) # distance between drops
+tdist[1] <-tdrop[1]-nInts*M+1
+tdistrel <- tdist/sum(tdist) # relative distance
+
+# Susanne weighting:
+Qweights <- nt/sum(nt)
+  
+# My weighting
+#Qweights <- nt**2*tdistrel # weight(t) = nt^3*tdist
+#Qweights <- Qweights/sum(Qweights)
+
+
+
+
+
+########################################################
+#### CONSTRUCT the expected "normal" distribution Q ####
+########################################################
+
+# original Q (no moving window: disjoint cross validation)
+constructQ <- function(dtIn,R=0){
+  # Dataframe and R (boolean) for random sampling where
+  # we exclude a random subset of size M if R =1
+  
+  ndrops <- length(tdrop)
+  Qmat <- matrix(0,nrow=N-1,ncol=ndrops) # initiate Q at different (weighted) areas
+  tmax <- max(tdrop) # last whale dropped
+  dummyvec <- rep(0,ndrops)
+  tdist.dummy <- tdist 
+  
+  if(R<0)tskip <- sample(Nt:(tmax),1)
+  if(R>0)tskip <- R
+  
+  # correct normalization after removal of one hour
+  idxRemove <- ndrops+1-sum(tskip<=tdrop)
+  tdist.dummy[idxRemove] <- tdist.dummy[idxRemove]-1
+  
+  Q <- rep(0,length(qts)-1)
+  for(t in Nt:(tmax)){
+    
+    if(t!=tskip){ # if not the random subset that we exclude
+  
+      if(length(dtIn[dtIn$min>=(t-1)*M*60 & dtIn$min<t*M*60 & dtIn$TD!=0]$TD)!=0){
+      t.N <-aggregate(list(TDD=dtIn[dtIn$min>=(t-1)*M*60 
+                                & dtIn$min<t*M*60 & dtIn$TD!=0]$TDD),
+                    list(TD=as.integer(dtIn[dtIn$min>=(t-1)*M*60 
+                                       & dtIn$min<t*M*60 
+                                        & dtIn$TD!=0]$TD)),
+                    sum)
+  
+      # aggregate over TD quantile intervals (and add missing intervals)
+      t.N <- aggregate(list(TDD=t.N$TDD),list(TD.interval=qMap(t.N$TD)),sum)
+      t.N0 <- data.frame(TD.interval = qts[-1],TDD=0)
+      t.N0[which(qts[-1] %in% t.N$TD.interval),]$TDD <- t.N$TDD
+    
+      # get relevant area
+      idx <- ndrops+1-sum(t<=tdrop)
+      # add to Q for that area
+      Qmat[1:(N-1),idx] <- Qmat[1:(N-1),idx]+t.N0$TDD/sum(t.N0$TDD)
+      
+      }
+      else{Qmat[1:(N-1),idx] <-  Qmat[1:(N-1),idx] + rep(0,(N-1))}
+     }
+     
+  }
+  
+  Qmat <- t(replicate(N-1,Qweights))*Qmat/t(replicate(N-1,tdist.dummy)) # normalize
+  return(rowSums(Qmat))
+}
+
+
+
+##################################
+#### CALCULATE Jensen-Shannon ####
+##################################
+
+
+tmax<-floor(max(dt.long$min)/60) # max sampling time
+tmax.short <- floor(max(dt.short$min)/60)
+JS.short <- rep(0,tmax.short) # create Jensen Shannon vector
+JS.long <- rep(0,tmax) # create Jensen Shannon vector
+JS.all <- rep(0,tmax)
+
+for(t in 1:tmax){
+  
+  print(t)
+  
+  Q<-constructQ(dt,-1) # construct Q by removing a K subset randomly
+  if(t>=Nt){Q<-constructQ(dt,t)}
+  
+  ### ALL handling:
+  t.all <-aggregate(list(TDD=dt[dt$min>=(t-1)*M*60 
+                              & dt$min<t*M*60 & dt$TD!=0]$TDD),
+                  list(TD=as.integer(dt[dt$min>=(t-1)*M*60 
+                                      & dt$min<t*M*60 
+                                      & dt$TD!=0]$TD)),
+                  sum)
+  
+  # aggregate over TD quantile intervals (and add missing intervals)
+  t.all <- aggregate(list(TDD=t.all$TDD),list(TD.interval=qMap(t.all$TD)),sum)
+  t.all0 <- data.frame(TD.interval = qts[-1],TDD=0)
+  t.all0[which(qts[-1] %in% t.all$TD.interval),]$TDD <- t.all$TDD
+  
+  # Handling the kth subset
+  P.all <- t.all0$TDD/sum(t.all0$TDD)
+  
+  # calculate JSD
+  MM <- 1/2*(P.all+Q)
+  JS.all[t] <- 1/2*KB(P.all,MM)+1/2*KB(Q,MM)
+  
+  
+  ## TODO: REMOVE CONDITION IN BELOW 2 LINES, IF NO SEPERATE NORMAL AREA
+  #Q<-constructQ(dt[dt$HT=="Short",],-1) # construct Q by removing a K subset randomly
+  #if(t>=Nt){Q<-constructQ(dt[dt$HT=="Short",],t)}
+  
+  ### SHORT handling:
+  if(t<=tmax.short){
+    t.short <-aggregate(list(TDD=dt.short[dt.short$min>=(t-1)*M*60 
+                              & dt.short$min<t*M*60 & dt.short$TD!=0]$TDD),
+                  list(TD=as.integer(dt.short[dt.short$min>=(t-1)*M*60 
+                                      & dt.short$min<t*M*60 
+                                      & dt.short$TD!=0]$TD)),
+                  sum)
+  
+    # aggregate over TD quantile intervals (and add missing intervals)
+    t.short <- aggregate(list(TDD=t.short$TDD),list(TD.interval=qMap(t.short$TD)),sum)
+    t.short0 <- data.frame(TD.interval = qts[-1],TDD=0)
+    t.short0[which(qts[-1] %in% t.short$TD.interval),]$TDD <- t.short$TDD
+    
+    # Handling the kth subset
+    P.short <- t.short0$TDD/sum(t.short0$TDD)
+    
+    if(t<th) DT.all[DT.all$Interval==t & DT.all$HT=="Short (N=5)",]$TDD <- P.short
+    
+    # calculate JSD
+    MM <- 1/2*(P.short+Q)
+    JS.short[t] <- 1/2*KB(P.short,MM)+1/2*KB(Q,MM)
+  }
+  ## TODO: COMMENT THE BELOW 2 LINES OUT, iF NO SEPERATE NORMAL AREA FOR HANDLING
+  #Q<-constructQ(dt[dt$HT=="Long",],-1) # construct Q by removing a K subset randomly
+  #if(t>=Nt){Q<-constructQ(dt[dt$HT=="Long",],t)}
+  
+  ### LONG handling:
+  t.long <-aggregate(list(TDD=dt.long[dt.long$min>=(t-1)*M*60 
+                              & dt.long$min<t*M*60 & dt.long$TD!=0]$TDD),
+                  list(TD=as.integer(dt.long[dt.long$min>=(t-1)*M*60 
+                                      & dt.long$min<t*M*60 
+                                      & dt.long$TD!=0]$TD)),
+                  sum)
+  
+  # aggregate over TD quantile intervals (and add missing intervals)
+  t.long <- aggregate(list(TDD=t.long$TDD),list(TD.interval=qMap(t.long$TD)),sum)
+  t.long0 <- data.frame(TD.interval = qts[-1],TDD=0)
+  t.long0[which(qts[-1] %in% t.long$TD.interval),]$TDD <- t.long$TDD
+  
+  # Handling the kth subset
+  P.long <- t.long0$TDD/sum(t.long0$TDD)
+  
+  if(t<th) DT.all[DT.all$Interval==t & DT.all$HT=="Long (N=10)",]$TDD <- P.long
+  
+  # calculate JSD
+  MM <- 1/2*(P.long+Q)
+  JS.long[t] <- 1/2*KB(P.long,MM)+1/2*KB(Q,MM)
+}
+
+# add reference distribution to DEPTHGRID
+DT.all[DT.all$Interval==th & DT.all$HT=="Long (N=10)",]$TDD <- constructQ(dt[dt$HT=="Long",],-1)
+DT.all[DT.all$Interval==th & DT.all$HT=="Short (N=5)",]$TDD <- constructQ(dt[dt$HT=="Short",],-1)
+
+# Normal area Jensen-Shannon (combine)
+trim.max <- 100
+JS.N.short <- JS.short[Nt:trim.max]
+JS.N.long <- JS.long[Nt:trim.max]
+JS.N <- JS.all[Nt:trim.max]
+
+# Weighted JS normal (also combining short and long)
+JS.N <- c(JS.N.short,JS.N.long)
+```
+
+# Depthgrid
+
+```{r}
+#### PLOT: Combined Dataframe ####
+
+#intLabsx <- c(sapply(seq(1,nInts*M-1,M),function(x) paste0("[",x,",",x+M,"[") ),"Normal")
+intLabsx <- c(1:(nInts*M-1),"Normal")
+intLabsy <- mapply(function(X,Y)paste0("[",X,",",Y,"[") ,qts[-N]*20,shift(qts,-1)[-N]*20)
+names(intLabsy)<-NULL
+names(qts)<- NULL
+
+ggplot(DT.all,aes(x=as.factor(Interval),y=as.factor(TD),fill=TDD)) +
+  geom_tile(aes(fill=TDD),color="black") +
+#  geom_text(aes(label = round(TDD,2)), color = "black", size = 4)+
+  coord_fixed()+
+  xlab("hours")+
+  ylab("Target depth (meters)")+
+  scale_fill_gradient(low = "white", high = "purple3",name="Time spend (%)")+
+  scale_x_discrete(breaks = 1:(nInts),labels=intLabsx)+
+  scale_y_discrete(breaks=as.factor(1:(N-1)),labels=intLabsy)+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1.0, hjust=1),
+        plot.title =element_text(hjust = 0.5))+
+  ggtitle("Hourly emperical distribution(s) of Dive Duration for N=15 narwhals")+
+  facet_wrap(.~HT,ncol=1)
+
+#ggsave("DepthGrid-NW.pdf",dpi=600) # width 10 height 8
+
+save(DT.all, file="NWDG.RData")
+```
+
+# JS
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Differentiate handling time, and weight JS-normal
+df.JS <- data.frame(Interval=rep(1:trim.max,2),
+                   Handlingtime=rep(c("Short (5)","Long (10)"),each=trim.max),
+JS=c(JS.short[1:trim.max],JS.long[1:trim.max]))
+
+plot.max <- 80 # plotting range
+
+ggplot(df.JS,aes(x=Interval,y=JS,fill=Handlingtime))+
+geom_ribbon(aes(ymin=quantile(JS.N,0.025) ,alpha=I(0.2),ymax =quantile(JS.N,0.975)),color="black",fill="thistle")+
+# geom_ribbon(aes(ymin=quantile(JS.N.short,0.025) , ymax = quantile(JS.N.short,0.975)),alpha=I(0.2),color="black",fill="brown1")+      geom_ribbon(aes(ymin=quantile(JS.N.long,0.025) , ymax = quantile(JS.N.long,0.975)),alpha=I(0.4),color="black",fill="dodgerblue1")+
+  geom_point(size=2,shape=24)+
+  geom_vline(aes(xintercept=8.8),linetype="longdash",color="red")+
+  geom_vline(aes(xintercept=8.2),linetype="solid",color="red")+
+  geom_vline(aes(xintercept=9.8),linetype="solid",color="red")+
+  geom_vline(aes(xintercept=13.6),linetype="longdash",color="blue")+
+  geom_vline(aes(xintercept=11.2),linetype="solid",color="blue")+
+  geom_vline(aes(xintercept=16.1),linetype="solid",color="blue")+
+  geom_hline(aes(yintercept=mean(JS.N)),linetype="longdash")+
+  ylab("Jensen-Shannon divergence")+
+  xlab("hours")+
+  scale_x_continuous(breaks=seq(0,plot.max,max(1,floor(5/M))),
+                     labels=M*seq(0,plot.max,max(1,floor(5/M))),
+                     limits=c(1,plot.max))+
+#  scale_color_manual(values=c("gray0","blue", "red"))+
+#  scale_fill_manual(values=c("darkorchid1","royalblue", "brown1"))+
+ scale_color_manual(values=c("blue", "red"))+
+  scale_fill_manual(values=c("royalblue", "brown1"))+
+  labs(title = str_wrap("Cross entropy of hourly Dive duration post-tagging relative to normal (> 40 hours) Dive duration for N=15 narwhals ", 60))+
+  theme(legend.position="bottom",plot.title=element_text(hjust=0.5))
+ggsave("JS-NW.pdf",width=10,height=6,dpi=600)
+
+```
+
+
+```{r}
+############################################
+#### USE VOTING TO DETERMINE BREAKPOINT ####
+############################################
+
+# TODO: Change JS.N to JS.N.long and JS.N.short resp. if different CI is used.
+alpha.long <- quantile(JS.N,0.975)
+alpha.short <- quantile(JS.N,0.975)
+alpha.all <- quantile(JS.N,0.975)
+V.long <- data.frame(hours=1:trim.max,
+                  Votes=rep(0,trim.max),
+                  HT="Long",
+                  Vpred=NA,
+                  Vu=NA,
+                  Vl=NA) # Votes dataframe
+V.short <- data.frame(hours=1:trim.max,
+                  Votes=rep(0,trim.max),
+                  HT="Short",
+                  Vpred=NA,
+                  Vu=NA,
+                  Vl=NA) # Votes dataframe
+V.all <- data.frame(hours=1:trim.max,
+                  Votes=rep(0,trim.max),
+                  HT="All",
+                  Vpred=NA,
+                  Vu=NA,
+                  Vl=NA) # Votes
+# Initiate
+if(JS.long[1]>alpha.long) V.long[1,]$Votes <--1 else V.long[1,]$Votes <-1
+if(JS.short[1]>alpha.short) V.short[1,]$Votes <--1 else V.short[1,]$Votes <-1
+if(JS.all[1]>alpha.all) V.all[1,]$Votes <--1 else V.all[1,]$Votes <-1
+
+for(t in 2:trim.max){
+  # all
+  if(JS.all[t]>alpha.all){V.all[t,]$Votes <- V.all[t-1,]$Votes - 1}
+  else{V.all[t,]$Votes <- V.all[t-1,]$Votes +1}
+  # long
+  if(JS.long[t]>alpha.long){V.long[t,]$Votes <- V.long[t-1,]$Votes - 1}
+  else{V.long[t,]$Votes <- V.long[t-1,]$Votes +1}
+  # short
+  if(JS.short[t]>alpha.short){V.short[t,]$Votes <- V.short[t-1,]$Votes - 1}
+  else{V.short[t,]$Votes <- V.short[t-1,]$Votes +1}
+}
+
+```
+
+
+
+```{r}
+##########################################################
+### METHOD 1: BLOCK BOOTSTRAPPING SIMPLE #################
+##########################################################
+
+# Function to check if inside or outside CI
+plusMinus <- Vectorize(
+  function(x,HT){ 
+  ifelse(HT=="A", ifelse(x>alpha.all,-1,1), ifelse(HT=="S",ifelse(x>alpha.short,-1,1), ifelse(x>alpha.long,-1,1)))
+  }
+  )
+
+N.sims <- 200 # number of sims
+lB <- 5 # length of block
+B <- floor(trim.max/lB) # number of blocks
+t.max <- floor(trim.max/lB)*lB
+time.hrs <- 1:t.max # time
+
+# breakpoints
+BP.A <- rep(0,N.sims)
+BP.L <- rep(0,N.sims)
+BP.S <- rep(0,N.sims)
+
+# sample for graphical example
+exN <- 3
+exdf.S <- data.frame(hours=rep(time.hrs,exN),votes=NA,ID=rep(1:exN,each=t.max))
+exdf.L <- data.frame(hours=rep(time.hrs,exN),votes=NA,ID=rep(1:exN,each=t.max))
+
+for(n in 1:N.sims){
+  # case resampling within each block
+  V.bs.S <- rep(0,t.max)
+  V.bs.L <- rep(0,t.max)
+  V.bs.A <- rep(0,t.max)
+  for(b in 0:(B-1)){
+    idx <- (b*lB+1):((b+1)*lB) # indices
+    V.bs.S[idx] <- sample(plusMinus(JS.short[idx],"S")) # block sampling
+    V.bs.L[idx] <- sample(plusMinus(JS.long[idx],"L")) # block sampling
+    V.bs.A[idx] <- sample(plusMinus(JS.all[idx],"A"))
+  }  
+  # make dataframes
+  datf.L <-data.frame(votes=c(0,cumsum(V.bs.L)),hours=c(0,time.hrs))
+  datf.S <-data.frame(votes=c(0,cumsum(V.bs.S)),hours=c(0,time.hrs))
+  datf.A <-data.frame(votes=c(0,cumsum(V.bs.A)),hours=c(0,time.hrs))
+  
+  # save graphical example
+  if(n <= exN){
+    exdf.S[exdf.S$ID==n,]$votes <- cumsum(V.bs.S)
+    exdf.L[exdf.L$ID==n,]$votes <- cumsum(V.bs.L)
+  }
+  
+  # compute breakpoints using segmented regression
+  lm.A <- lm(votes~hours,data=datf.A)
+  sm.A <- segmented(lm.A)
+  lm.L <- lm(votes~hours,data=datf.L)
+  sm.L <-segmented(lm.L)
+  lm.S <- lm(votes~hours,data=datf.S)
+  sm.S <-segmented(lm.S)
+  
+  BP.A[n] <- sm.A$psi[2]
+  BP.L[n] <- sm.L$psi[2]
+  BP.S[n] <- sm.S$psi[2]
+}
+
+# statistics
+mean(BP.A)
+quantile(BP.A,c(0.025,0.975))
+mean(BP.L)
+quantile(BP.L,c(0.025,0.975))
+mean(BP.S)
+quantile(BP.S,c(0.025,0.975))
+
+exdf <- rbind(exdf.S,exdf.L)
+exdf$handlingtime <- rep(c("Short","Long"),each=t.max*exN)
+
+# plot graphical examples
+ggplot(exdf, aes(hours,votes,color=factor(ID)))+
+  geom_line(size=1)+
+  
+  ggtitle("Block bootstrap samples (3 examples)")+
+  facet_wrap(.~handlingtime)
+
+ggsave("JS-votes-samples-2.pdf",width=10,height=6,dpi=600)
+
+
+## SAVE DATA
+save(df.JS,file="NW.JS.RData")
+save(JS.N,file="NW.JSN.RData")
+meansdf <- data.frame(HT=rep(c("Short","Long"),each=3),
+                      rec=c(8.8,8.2,9.8,13.6,11.2,15.9))
+save(meansdf,file="NW.means.RData")
+
+
+```
+
+```{r}
+##########################################################
+### METHOD 2: BLOCK BOOTSTRAPPING RUNNING ################
+##########################################################
+
+# Function to check if inside or outside CI
+plusMinus <- Vectorize(
+  function(x,HT){ 
+  ifelse(HT=="A", ifelse(x>alpha.all,-1,1), ifelse(HT=="S",ifelse(x>alpha.short,-1,1), ifelse(x>alpha.long,-1,1)))
+  }
+  )
+
+N.sims <- 100 # number of sims
+deltaT <- 10 # running block size
+time.hrs <- 1:(th-deltaT) # time
+
+# breakpoints
+BP.A <- rep(0,N.sims)
+BP.L <- rep(0,N.sims)
+BP.S <- rep(0,N.sims)
+
+for(n in 1:N.sims){
+  # case resampling within each block
+  V.bs.S <- rep(0,th-deltaT)
+  V.bs.L <- rep(0,th-deltaT)
+  V.bs.A <- rep(0,th-deltaT)
+  for(t in 1:(th-deltaT)){
+    idx <- t:(t+deltaT) # indices
+    V.bs.S[t] <- mean(sample(plusMinus(JS.short[idx],"S"))) # block sampling
+    V.bs.L[t] <- mean(sample(plusMinus(JS.long[idx],"L"))) # block sampling
+    V.bs.A[t] <- mean(sample(plusMinus(JS.long[idx],"A")))
+  }  
+  # make dataframes
+  datf.L <-data.frame(votes=cumsum(V.bs.L),hours=time.hrs)
+  datf.S <-data.frame(votes=cumsum(V.bs.S),hours=time.hrs)
+  datf.A <-data.frame(votes=cumsum(V.bs.A),hours=time.hrs)
+  
+  
+  # compute breakpoints using segmented regression
+  lm.A <- lm(votes~hours,data=datf.A)
+  sm.A <- segmented(lm.A)
+  lm.L <- lm(votes~hours,data=datf.L)
+  sm.L <-segmented(lm.L)
+  lm.S <- lm(votes~hours,data=datf.S)
+  sm.S <-segmented(lm.S)
+  
+  BP.A[n] <- sm.A$psi[2]
+  BP.L[n] <- sm.L$psi[2]
+  BP.S[n] <- sm.S$psi[2]
+}
+
+# statistics
+mean(BP.A)
+quantile(BP.A,c(0.025,0.975))
+mean(BP.L)
+quantile(BP.L,c(0.025,0.975))
+mean(BP.S)
+quantile(BP.S,c(0.025,0.975))
+
+```
+
+
+
+```{r}
+##########################################################
+### METHOD 3: USE SIEVES BOOTSTRAPPING FOR TIME SERIES ###
+##########################################################
+
+N.bs <- 100 # simulations
+
+# simulate using Sieve Bootstrapping surrogates
+long.sur <- surrogate.AR(JS.long,order.max = 10,nsurr=N.bs)
+short.sur <- surrogate.AR(JS.short,order.max = 10,nsurr=N.bs)
+time.ar <- V.long$hours
+
+BP.long <- rep(0,N.bs)
+BP.short <- rep(0,N.bs)
+
+for(n in 1:N.bs){
+  datf.l <- data.frame(votes=plusMinus(long.sur[[1]][,n],"L"),hours=time.ar)
+  datf.s <- data.frame(votes=plusMinus(short.sur[[1]][,n],"S"),hours=time.ar)
+  lm.long <- lm(votes~hours,data=datf.l)
+  sm.long <-segmented(lm.long)
+  lm.short <- lm(votes~hours,data=datf.s)
+  sm.short <-segmented(lm.short)
+  
+  BP.long[n] <- sm.long$psi[2]
+  BP.short[n] <- sm.short$psi[2]
+}
+
+mean(BP.long)
+quantile(BP.long,c(0.025,0.975))
+mean(BP.short)
+quantile(BP.short,c(0.025,0.975))
+```
+
+
+```{r }
+####################################################
+######## METHOD 4: VOTING (ORIGINAL) ##############
+####################################################
+
+
+# fit segmented regression
+lm.fit.short <- lm(Votes~hours,data=V.short)
+lm.fit.long <- lm(Votes~hours,data=V.long)
+m.fit.short <- segmented(lm.fit.short,control=seg.control(nonParam=F),psi=10) # segmented
+m.fit.long <- segmented(lm.fit.long,control=seg.control(nonParam=F),psi=35) # segmented
+
+
+V.short[,c(4,5,6)] <- predict(m.fit.short,newdata=V.short,interval="confidence")
+V.long[,c(4,5,6)] <- predict(m.fit.long,newdata=V.long,interval="confidence")
+
+Votes <- rbind(V.short,V.long)
+
+# confidene intervals for breakpoints
+confint(m.fit.short)
+confint(m.fit.long)
+
+# plot
+ggplot(Votes, aes(hours,Votes,color=HT))+
+ geom_line(aes(y=Vpred))+
+ geom_ribbon(aes(ymin=Vl,ymax=Vu,color=HT),alpha=I(0.2),color="black")+
+  geom_line(size=1)+
+  scale_color_manual(values=c("blue","red"))+
+  facet_wrap(.~HT)+
+  theme(legend.position = "none")
+
+ggsave("JS-votes.pdf",width=10,height=6,dpi=600)
+```
+
+
+
